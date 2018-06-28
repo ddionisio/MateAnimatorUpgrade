@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEditor;
 
+using DG.Tweening;
+
 namespace M8.Animator.Upgrade {
     public class ConvertWindow : EditorWindow {
         [System.Flags]
@@ -40,11 +42,11 @@ namespace M8.Animator.Upgrade {
         
         private Texture2D mTextureBlank;
 
-        private IEnumerator mConvertRout;
+        private EditorCoroutines.EditorCoroutine mConvertRout;
 
         private Dictionary<string, string> mGUIDMetaMatch; //match AnimatorMeta to AnimateMeta GUID
 
-        private bool mIsRemoveOldAnimatorComp;
+        private bool mIsRemoveOldAnimatorComp = true;
 
         [MenuItem("M8/Animator Convert Old")]
         static void Init() {
@@ -128,16 +130,7 @@ namespace M8.Animator.Upgrade {
 
             if(doConvert) {
                 if(UnityEditor.EditorUtility.DisplayDialog("Convert", "This will go through and convert AnimatorData to Animate. Make sure to go through your scripts and update the references.", "Proceed")) {
-                    mConvertRout = DoConvert(convertFlags, mIsRemoveOldAnimatorComp);
-                }
-            }
-        }
-
-        void Update() {
-            if(mConvertRout != null) {
-                if(!mConvertRout.MoveNext()) {
-                    mConvertRout = null;
-                    Repaint();
+                    mConvertRout = EditorCoroutines.StartCoroutine(DoConvert(convertFlags, mIsRemoveOldAnimatorComp), this);
                 }
             }
         }
@@ -162,6 +155,8 @@ namespace M8.Animator.Upgrade {
                     if(animData) {
                         //AddMessage(path);
 
+                        //make sure a new animator does not exist
+
                         UnityEditor.EditorUtility.SetDirty(animData.gameObject);
 
                         animDataList.Add(new AnimatorAssetInfo() { guid=prefabGUIDs[i], path=path, animData=animData });
@@ -169,8 +164,14 @@ namespace M8.Animator.Upgrade {
                 }
 
                 //Go through and convert animators
-                for(int i = 0; i < animDataList.Count; i++)
-                    yield return DoConvertAnimator(animDataList[i].animData, animDataList[i].guid, animDataList[i].path);
+                for(int i = 0; i < animDataList.Count; i++) {
+                    yield return EditorCoroutines.StartCoroutine(DoConvertAnimator(animDataList[i].animData, animDataList[i].guid, animDataList[i].path), this);
+
+                    //delete old animator?
+                    if(removeOldReference) {
+                        Object.DestroyImmediate(animDataList[i].animData, true);
+                    }
+                }
             }
 
             //convert from all scenes
@@ -225,17 +226,157 @@ namespace M8.Animator.Upgrade {
             }
             else {
                 //construct and convert takes
+                foreach(var oldTake in oldAnimTarget.takes) {
+                    var newTake = new Take();
+
+                    AddMessage(" - convert take: " + oldTake.name);
+
+                    yield return EditorCoroutines.StartCoroutine(DoConvertTake(oldAnimTarget, newAnimTarget, oldTake, newTake), this);
+
+                    newAnimTarget.takes.Add(newTake);
+                }
             }
 
             newAnim.defaultTakeName = animData.defaultTakeName;
-
+            
+            mConvertRout = null;
+            Repaint();
         }
 
-        IEnumerator DoConvertTake(AMTakeData oldTake, Take newTake) {
-            yield return null;
+        IEnumerator DoConvertTake(AMITarget oldTarget, ITarget newTarget, AMTakeData oldTake, Take newTake) {
+            newTake.name = oldTake.name;
+            newTake.frameRate = oldTake.frameRate;
+            newTake.endFramePadding = oldTake.endFramePadding;
+            newTake.numLoop = oldTake.numLoop;
+            newTake.loopMode = oldTake.loopMode;
+            newTake.loopBackToFrame = oldTake.loopBackToFrame;
+            newTake.trackCounter = oldTake.track_count;
+            newTake.groupCounter = oldTake.group_count;
+
+            //go through groups
+            newTake.rootGroup = new Group();
+            newTake.rootGroup.group_name = oldTake.rootGroup.group_name;
+            newTake.rootGroup.group_id = oldTake.rootGroup.group_id;
+            newTake.rootGroup.elements = new List<int>(oldTake.rootGroup.elements);
+            newTake.rootGroup.foldout = oldTake.rootGroup.foldout;
+
+            newTake.groupValues = new List<Group>();
+            foreach(var oldGroup in oldTake.groupValues) {
+                var newGroup = new Group();
+                newGroup.group_name = oldGroup.group_name;
+                newGroup.group_id = oldGroup.group_id;
+                newGroup.elements = new List<int>(oldGroup.elements);
+                newGroup.foldout = oldGroup.foldout;
+
+                newTake.groupValues.Add(newGroup);
+            }
+
+            //go through tracks
+            newTake.trackValues = new List<Track>();
+            foreach(var oldTrack in oldTake.trackValues) {
+                AddMessage("  - convert track: " + oldTrack.name);
+
+                Track newTrack = null;
+
+                if(oldTrack is AMAnimationTrack) {
+
+                }
+                else if(oldTrack is AMAudioTrack) {
+
+                }
+                else if(oldTrack is AMCameraSwitcherTrack) {
+
+                }
+                else if(oldTrack is AMEventTrack) {
+
+                }
+                else if(oldTrack is AMGOSetActiveTrack) {
+
+                }
+                else if(oldTrack is AMMaterialTrack) {
+
+                }
+                else if(oldTrack is AMOrientationTrack) {
+
+                }
+                else if(oldTrack is AMPropertyTrack) {
+
+                }
+                else if(oldTrack is AMRotationEulerTrack) {
+
+                }
+                else if(oldTrack is AMRotationTrack) {
+                    newTrack = new RotationTrack();
+
+                    ConvertTrackCommonFields(oldTrack, newTrack);
+
+                    newTrack.SetTarget(newTarget, oldTrack.GetTarget(oldTarget) as Transform);
+
+                    newTrack.keys = new List<Key>();
+
+                    foreach(AMRotationKey oldKey in oldTrack.keys) {
+                        var newKey = new RotationKey();
+
+                        ConvertKeyCommonFields(oldKey, newKey);
+
+                        newKey.rotation = oldKey.rotation;
+                        newKey.endFrame = oldKey.endFrame;
+
+                        newTrack.keys.Add(newKey);
+                    }
+                }
+                else if(oldTrack is AMTranslationTrack) {
+                    newTrack = new TranslationTrack();
+
+                    ConvertTrackCommonFields(oldTrack, newTrack);
+
+                    newTrack.SetTarget(newTarget, oldTrack.GetTarget(oldTarget) as Transform);
+
+                    newTrack.keys = new List<Key>();
+
+                    foreach(AMTranslationKey oldKey in oldTrack.keys) {
+                        var newKey = new TranslationKey();
+
+                        ConvertKeyCommonFields(oldKey, newKey);
+
+                        newKey.position = oldKey.position;
+                        newKey.endFrame = oldKey.endFrame;
+                        newKey.isConstSpeed = oldKey.isConstSpeed;
+
+                        newKey.path = new Vector3[oldKey.path.Length];
+                        System.Array.Copy(oldKey.path, newKey.path, newKey.path.Length);
+
+                        newTrack.keys.Add(newKey);
+                    }
+                }
+                else if(oldTrack is AMTriggerTrack) {
+
+                }
+
+                newTake.trackValues.Add(newTrack);
+
+                yield return null;
+            }
         }
-        
+
+        void ConvertTrackCommonFields(AMTrack oldTrack, Track newTrack) {
+            newTrack.id = oldTrack.id;
+            newTrack.name = oldTrack.name;
+            newTrack.foldout = oldTrack.foldout;
+        }
+
+        void ConvertKeyCommonFields(AMKey oldKey, Key newKey) {
+            newKey.version = oldKey.version;
+            newKey.interp = (Key.Interpolation)oldKey.interp;
+            newKey.frame = oldKey.frame;
+            newKey.easeType = (Ease)oldKey.easeType;
+            newKey.amplitude = oldKey.amplitude;
+            newKey.period = oldKey.period;
+            newKey.customEase = new List<float>(oldKey.customEase);
+        }
+
         private void AddMessage(string text) {
+            //Debug.Log(text);
             mMessages.Add(new Message(text));
         }
 
@@ -244,4 +385,6 @@ namespace M8.Animator.Upgrade {
         }
     }
 }
+ 
+ 
  
