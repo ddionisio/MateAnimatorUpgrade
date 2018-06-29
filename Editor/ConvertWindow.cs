@@ -11,7 +11,7 @@ namespace M8.Animator.Upgrade {
         public enum ConvertFlags {
             None = 0,
             Assets = 1,
-            CurrentScene = 2,
+            Loaded = 2,
             AllScenes = 4,
         }
 
@@ -33,7 +33,14 @@ namespace M8.Animator.Upgrade {
         public struct AnimatorAssetInfo {
             public string guid;
             public string path;
+            public GameObject rootGO;
             public AnimatorData animData;
+        }
+
+        public struct MetaInfo {
+            public string guid;
+            public string path;
+            public AnimateMeta meta;
         }
 
         private List<Message> mMessages;
@@ -41,10 +48,10 @@ namespace M8.Animator.Upgrade {
         private Vector2 mScrollPos;
         
         private Texture2D mTextureBlank;
+        
+        private bool mIsConverting;
 
-        private EditorCoroutines.EditorCoroutine mConvertRout;
-
-        private Dictionary<string, string> mGUIDMetaMatch; //match AnimatorMeta to AnimateMeta GUID
+        private Dictionary<string, MetaInfo> mGUIDMetaMatch; //match AnimatorMeta to AnimateMeta GUID
 
         private bool mIsRemoveOldAnimatorComp = true;
 
@@ -66,7 +73,7 @@ namespace M8.Animator.Upgrade {
 
             mMessages = new List<Message>();
 
-            mGUIDMetaMatch = new Dictionary<string, string>();
+            mGUIDMetaMatch = new Dictionary<string, MetaInfo>();
         }
 
         void OnGUI() {
@@ -99,7 +106,7 @@ namespace M8.Animator.Upgrade {
 
             GUILayout.Space(4f);
 
-            GUI.enabled = mConvertRout == null;
+            GUI.enabled = !mIsConverting;
 
             bool doConvert = false;
             ConvertFlags convertFlags = ConvertFlags.None;
@@ -116,9 +123,9 @@ namespace M8.Animator.Upgrade {
                 convertFlags = ConvertFlags.AllScenes;
             }
 
-            if(GUILayout.Button("Convert From Current Scene")) {
+            if(GUILayout.Button("Convert From Loaded Objects")) {
                 doConvert = true;
-                convertFlags = ConvertFlags.CurrentScene;
+                convertFlags = ConvertFlags.Loaded;
             }
 
             if(GUILayout.Button("Convert All")) {
@@ -130,42 +137,94 @@ namespace M8.Animator.Upgrade {
 
             if(doConvert) {
                 if(UnityEditor.EditorUtility.DisplayDialog("Convert", "This will go through and convert AnimatorData to Animate. Make sure to go through your scripts and update the references.", "Proceed")) {
-                    mConvertRout = EditorCoroutines.StartCoroutine(DoConvert(convertFlags, mIsRemoveOldAnimatorComp), this);
+                    EditorCoroutines.StartCoroutine(DoConvert(convertFlags, mIsRemoveOldAnimatorComp), this);
                 }
             }
         }
 
         IEnumerator DoConvert(ConvertFlags flags, bool removeOldReference) {
+            mIsConverting = true;
+
             var prefabGUIDs = AssetDatabase.FindAssets("t:Prefab");
 
             //convert Meta Animators, record its GUID match for later
-            mGUIDMetaMatch.Clear();
+            for(int i = 0; i < prefabGUIDs.Length; i++) {
+                var guid = prefabGUIDs[i];
+
+                MetaInfo metaInfo;
+                if(mGUIDMetaMatch.TryGetValue(guid, out metaInfo)) { //already processed from before
+                    //make sure meta still exists
+                    if(metaInfo.meta)
+                        continue;
+                    else { //recreate
+                        mGUIDMetaMatch.Remove(guid);
+                    }
+                }
+
+                var path = AssetDatabase.GUIDToAssetPath(prefabGUIDs[i]);
+
+                var animMeta = AssetDatabase.LoadAssetAtPath<AnimatorMeta>(path);
+                if(animMeta) {
+                    //check if it already has a converted asset
+                    string metaConvertPath = GetNewMetaPath(path);
+                    string metaConvertGUID = AssetDatabase.AssetPathToGUID(metaConvertPath);
+                    if(!string.IsNullOrEmpty(metaConvertGUID)) {
+                        //add to meta match
+                        var meta = AssetDatabase.LoadAssetAtPath<AnimateMeta>(metaConvertPath);
+                        if(meta) { //if null, need to recreate
+                            mGUIDMetaMatch.Add(guid, new MetaInfo() { guid = metaConvertGUID, path = metaConvertPath, meta = meta });
+                            continue;
+                        }
+                    }
+
+                    //convert
+                    var newMeta = ScriptableObject.CreateInstance<AnimateMeta>();
+
+                    AddMessage("Creating new AnimateMeta: " + metaConvertPath);
+                    yield return new WaitForFixedUpdate();
+
+                    yield return EditorCoroutines.StartCoroutine(DoConvertAnimatorMeta(animMeta, newMeta), this);
+
+                    AssetDatabase.CreateAsset(newMeta, metaConvertPath);
+                    AssetDatabase.SaveAssets();
+
+                    mGUIDMetaMatch.Add(guid, new MetaInfo() { guid = AssetDatabase.AssetPathToGUID(metaConvertPath), path = metaConvertPath, meta = newMeta });
+                }
+            }
 
             //convert from Asset
             if((flags & ConvertFlags.Assets) != ConvertFlags.None) {
                 AddMessage("Grabbing Animators from Assets...");
-                yield return null;
+                yield return new WaitForFixedUpdate();
 
                 //Grab prefabs with AnimatorData
                 var animDataList = new List<AnimatorAssetInfo>();
-                                
+
                 for(int i = 0; i < prefabGUIDs.Length; i++) {
                     var path = AssetDatabase.GUIDToAssetPath(prefabGUIDs[i]);
                     var animData = AssetDatabase.LoadAssetAtPath<AnimatorData>(path);
                     if(animData) {
                         //AddMessage(path);
 
-                        //make sure a new animator does not exist
+                        //exclude ones with Animate on it, assume it is already converted
+                        var animate = animData.GetComponent<Animate>();
+                        if(animate)
+                            continue;
 
-                        UnityEditor.EditorUtility.SetDirty(animData.gameObject);
+                        var rootGO = animData.transform.root.gameObject;
 
-                        animDataList.Add(new AnimatorAssetInfo() { guid=prefabGUIDs[i], path=path, animData=animData });
+                        UnityEditor.EditorUtility.SetDirty(rootGO);
+
+                        animDataList.Add(new AnimatorAssetInfo() { guid = prefabGUIDs[i], path = path, animData = animData, rootGO = rootGO });
                     }
                 }
 
                 //Go through and convert animators
                 for(int i = 0; i < animDataList.Count; i++) {
-                    yield return EditorCoroutines.StartCoroutine(DoConvertAnimator(animDataList[i].animData, animDataList[i].guid, animDataList[i].path), this);
+                    AddMessage("Converting Animator: " + animDataList[i].path);
+                    yield return new WaitForFixedUpdate();
+
+                    yield return EditorCoroutines.StartCoroutine(DoConvertAnimator(animDataList[i].animData), this);
 
                     //delete old animator?
                     if(removeOldReference) {
@@ -174,34 +233,82 @@ namespace M8.Animator.Upgrade {
                 }
             }
 
-            //convert from all scenes
+            if((flags & ConvertFlags.AllScenes) != ConvertFlags.None) { //convert from all scenes
+                //UnityEngine.SceneManagement.SceneManager.GetAllScenes();
 
-            //convert from current scene
+                var sceneGUIDs = AssetDatabase.FindAssets("t:Scene");
+                for(int i = 0; i < sceneGUIDs.Length; i++) {
+                    var scenePath = AssetDatabase.GUIDToAssetPath(sceneGUIDs[i]);
 
+                    AddMessage("Loading scene: " + scenePath);
 
-            //record each animator reference id to rehook later
+                    var scene = UnityEditor.SceneManagement.EditorSceneManager.OpenScene(scenePath, UnityEditor.SceneManagement.OpenSceneMode.Single);
 
-            //convert animators
+                    yield return new WaitForSeconds(0.3f);
 
-            //go through each scene and grab animators, convert
+                    yield return EditorCoroutines.StartCoroutine(DoConvertFromLoadedScenes(removeOldReference), this);
 
-            //
+                    UnityEditor.SceneManagement.EditorSceneManager.SaveScene(scene);
 
-            yield return null;
+                    yield return new WaitForSeconds(0.3f);
+                }
+            }
+            else if((flags & ConvertFlags.Loaded) != ConvertFlags.None) { //convert from current scene
+                yield return EditorCoroutines.StartCoroutine(DoConvertFromLoadedScenes(removeOldReference), this);
+            }
+            
+            mIsConverting = false;
+            Repaint();
         }
 
-        IEnumerator DoConvertAnimatorMeta(AnimatorMeta animMeta, string guid, string path) {
-            yield return null;
+        IEnumerator DoConvertFromLoadedScenes(bool removeOldReference) {
+            AddMessage("Grabbing Animators from loaded objects...");
+            yield return new WaitForFixedUpdate();
+
+            var animDatas = Resources.FindObjectsOfTypeAll<AnimatorData>();
+
+            UnityEditor.SceneManagement.EditorSceneManager.MarkAllScenesDirty();
+
+            //go through and convert
+            for(int i = 0; i < animDatas.Length; i++) {
+                var go = animDatas[i].gameObject;
+
+                if(go.hideFlags == HideFlags.NotEditable || go.hideFlags == HideFlags.HideAndDontSave)
+                    continue;
+
+                //if(UnityEditor.EditorUtility.IsPersistent(go.transform.root.gameObject)) //exclude prefab instance
+                //  continue;
+
+                //exclude ones with Animate on it, assume it is already converted
+                var animate = go.GetComponent<Animate>();
+                if(animate)
+                    continue;
+
+                AddMessage("Converting Animator: " + animDatas[i].name);
+                yield return new WaitForFixedUpdate();
+
+                yield return EditorCoroutines.StartCoroutine(DoConvertAnimator(animDatas[i]), this);
+
+                //delete old animator?
+                if(removeOldReference) {
+                    Object.DestroyImmediate(animDatas[i]);
+                }
+            }
         }
 
-        IEnumerator DoConvertAnimator(AnimatorData animData, string guid, string path) {
-            if(!string.IsNullOrEmpty(path))
-                AddMessage("Converting Animator: " + path);
-            else
-                AddMessage("Converting Animator: " + animData.name);
+        IEnumerator DoConvertAnimatorMeta(AnimatorMeta oldMeta, AnimateMeta newMeta) {
+            foreach(var oldTake in oldMeta.takes) {
+                var newTake = new Take();
 
-            yield return null;
+                AddMessage(" - convert take: " + oldTake.name);
 
+                yield return EditorCoroutines.StartCoroutine(DoConvertTake(oldTake, newTake, true), this);
+
+                newMeta.takes.Add(newTake);
+            }
+        }
+
+        IEnumerator DoConvertAnimator(AnimatorData animData) {
             var go = animData.gameObject;
 
             Animate newAnim;
@@ -221,8 +328,17 @@ namespace M8.Animator.Upgrade {
             newAnim.updateTimeIndependent = animData.updateTimeIndependent;
 
             if(oldAnimTarget.isMeta) {
+                var oldMetaTarget = animData as AMIMeta;
+                var oldMetaPath = AssetDatabase.GetAssetPath(oldMetaTarget.meta);
+                var oldMetaGUID = AssetDatabase.AssetPathToGUID(oldMetaPath);
+
                 //grab matching meta for new anim., no need to construct takes
-                AddMessage("TODO");
+                MetaInfo metaInfo;
+                if(mGUIDMetaMatch.TryGetValue(oldMetaGUID, out metaInfo)) {
+                    newAnimTarget.meta = metaInfo.meta;
+                }
+                else
+                    AddMessage("Unable to find matching meta for: " + oldMetaPath, Color.yellow);
             }
             else {
                 //construct and convert takes
@@ -231,19 +347,16 @@ namespace M8.Animator.Upgrade {
 
                     AddMessage(" - convert take: " + oldTake.name);
 
-                    yield return EditorCoroutines.StartCoroutine(DoConvertTake(oldAnimTarget, newAnimTarget, oldTake, newTake), this);
+                    yield return EditorCoroutines.StartCoroutine(DoConvertTake(oldTake, newTake, false), this);
 
                     newAnimTarget.takes.Add(newTake);
                 }
             }
 
             newAnim.defaultTakeName = animData.defaultTakeName;
-            
-            mConvertRout = null;
-            Repaint();
         }
 
-        IEnumerator DoConvertTake(AMITarget oldTarget, ITarget newTarget, AMTakeData oldTake, Take newTake) {
+        IEnumerator DoConvertTake(AMTakeData oldTake, Take newTake, bool isMeta) {
             newTake.name = oldTake.name;
             newTake.frameRate = oldTake.frameRate;
             newTake.endFramePadding = oldTake.endFramePadding;
@@ -308,10 +421,8 @@ namespace M8.Animator.Upgrade {
                 else if(oldTrack is AMRotationTrack) {
                     newTrack = new RotationTrack();
 
-                    ConvertTrackCommonFields(oldTrack, newTrack);
-
-                    newTrack.SetTarget(newTarget, oldTrack.GetTarget(oldTarget) as Transform);
-
+                    ConvertTrackCommonFields(oldTrack, newTrack, isMeta);
+                                        
                     newTrack.keys = new List<Key>();
 
                     foreach(AMRotationKey oldKey in oldTrack.keys) {
@@ -328,10 +439,8 @@ namespace M8.Animator.Upgrade {
                 else if(oldTrack is AMTranslationTrack) {
                     newTrack = new TranslationTrack();
 
-                    ConvertTrackCommonFields(oldTrack, newTrack);
-
-                    newTrack.SetTarget(newTarget, oldTrack.GetTarget(oldTarget) as Transform);
-
+                    ConvertTrackCommonFields(oldTrack, newTrack, isMeta);
+                    
                     newTrack.keys = new List<Key>();
 
                     foreach(AMTranslationKey oldKey in oldTrack.keys) {
@@ -355,14 +464,19 @@ namespace M8.Animator.Upgrade {
 
                 newTake.trackValues.Add(newTrack);
 
-                yield return null;
+                yield return new WaitForFixedUpdate();
             }
         }
 
-        void ConvertTrackCommonFields(AMTrack oldTrack, Track newTrack) {
+        void ConvertTrackCommonFields(AMTrack oldTrack, Track newTrack, bool isMeta) {
             newTrack.id = oldTrack.id;
             newTrack.name = oldTrack.name;
             newTrack.foldout = oldTrack.foldout;
+
+            if(isMeta)
+                newTrack.SetTargetDirect(null, oldTrack.targetPath);
+            else
+                newTrack.SetTargetDirect(oldTrack.GetTarget(null), "");
         }
 
         void ConvertKeyCommonFields(AMKey oldKey, Key newKey) {
@@ -373,6 +487,14 @@ namespace M8.Animator.Upgrade {
             newKey.amplitude = oldKey.amplitude;
             newKey.period = oldKey.period;
             newKey.customEase = new List<float>(oldKey.customEase);
+        }
+
+        string GetNewMetaPath(string oldMetaPath) {
+            int extInd = oldMetaPath.LastIndexOf('.');
+            if(extInd == -1)
+                return oldMetaPath + ".asset";
+            else
+                return oldMetaPath.Substring(0, extInd) + ".asset";
         }
 
         private void AddMessage(string text) {
