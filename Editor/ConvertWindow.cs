@@ -106,12 +106,14 @@ namespace M8.Animator.Upgrade {
 
             GUILayout.EndScrollView();
 
-            GUILayout.Space(4f);
+            GUILayout.Space(8f);
 
             GUI.enabled = !mIsConverting;
 
             bool doConvert = false;
             ConvertFlags convertFlags = ConvertFlags.None;
+
+            bool doDeleteOldMetas = false;
 
             mIsRemoveOldAnimatorComp = GUILayout.Toggle(mIsRemoveOldAnimatorComp, new GUIContent("Remove Old Animator Component", "If toggled, will remove AnimatorData component, leave it in place otherwise."));
 
@@ -134,6 +136,11 @@ namespace M8.Animator.Upgrade {
                 doConvert = true;
                 convertFlags = ConvertFlags.Assets | ConvertFlags.AllScenes;
             }
+
+            GUILayout.Space(8f);
+
+            if(GUILayout.Button(new GUIContent("Delete All AnimatorMeta")))
+                doDeleteOldMetas = true;
                         
             GUI.enabled = defaultEnabled;
 
@@ -142,6 +149,34 @@ namespace M8.Animator.Upgrade {
                     EditorCoroutines.StartCoroutine(DoConvert(convertFlags, mIsRemoveOldAnimatorComp), this);
                 }
             }
+            else if(doDeleteOldMetas) {
+                if(UnityEditor.EditorUtility.DisplayDialog("Convert", "This will delete all AnimatorMeta in Assets. Only do this AFTER you have converted everything, especially Animators that are hooked with metas.", "Proceed")) {
+                    EditorCoroutines.StartCoroutine(DoDeleteMetas(), this);
+                }
+            }
+        }
+
+        IEnumerator DoDeleteMetas() {
+            mIsConverting = true;
+
+            var prefabGUIDs = AssetDatabase.FindAssets("t:Prefab");
+
+            for(int i = 0; i < prefabGUIDs.Length; i++) {
+                var guid = prefabGUIDs[i];
+
+                var path = AssetDatabase.GUIDToAssetPath(guid);
+
+                var animMeta = AssetDatabase.LoadAssetAtPath<AnimatorMeta>(path);
+                if(animMeta) {
+                    AddMessage("Deleting: " + path);
+                    yield return new WaitForFixedUpdate();
+
+                    AssetDatabase.DeleteAsset(path);
+                }
+            }
+
+            mIsConverting = false;
+            Repaint();
         }
 
         IEnumerator DoConvert(ConvertFlags flags, bool removeOldReference) {
