@@ -52,6 +52,7 @@ namespace M8.Animator.Upgrade {
         private bool mIsConverting;
 
         private Dictionary<string, MetaInfo> mGUIDMetaMatch; //match AnimatorMeta to AnimateMeta GUID
+        private Dictionary<string, TriggerSignal> mTriggerSignalLookup; //key = asset path
 
         private bool mIsRemoveOldAnimatorComp = true;
 
@@ -74,6 +75,7 @@ namespace M8.Animator.Upgrade {
             mMessages = new List<Message>();
 
             mGUIDMetaMatch = new Dictionary<string, MetaInfo>();
+            mTriggerSignalLookup = new Dictionary<string, TriggerSignal>();
         }
 
         void OnGUI() {
@@ -183,7 +185,7 @@ namespace M8.Animator.Upgrade {
                     AddMessage("Creating new AnimateMeta: " + metaConvertPath);
                     yield return new WaitForFixedUpdate();
 
-                    yield return EditorCoroutines.StartCoroutine(DoConvertAnimatorMeta(animMeta, newMeta), this);
+                    yield return EditorCoroutines.StartCoroutine(DoConvertAnimatorMeta(animMeta, newMeta, metaConvertPath), this);
 
                     AssetDatabase.CreateAsset(newMeta, metaConvertPath);
                     AssetDatabase.SaveAssets();
@@ -224,7 +226,7 @@ namespace M8.Animator.Upgrade {
                     AddMessage("Converting Animator: " + animDataList[i].path);
                     yield return new WaitForFixedUpdate();
 
-                    yield return EditorCoroutines.StartCoroutine(DoConvertAnimator(animDataList[i].animData), this);
+                    yield return EditorCoroutines.StartCoroutine(DoConvertAnimator(animDataList[i].animData, animDataList[i].path), this);
 
                     //delete old animator?
                     if(removeOldReference) {
@@ -287,7 +289,7 @@ namespace M8.Animator.Upgrade {
                 AddMessage("Converting Animator: " + animDatas[i].name);
                 yield return new WaitForFixedUpdate();
 
-                yield return EditorCoroutines.StartCoroutine(DoConvertAnimator(animDatas[i]), this);
+                yield return EditorCoroutines.StartCoroutine(DoConvertAnimator(animDatas[i], animDatas[i].name), this);
 
                 //delete old animator?
                 if(removeOldReference) {
@@ -296,19 +298,19 @@ namespace M8.Animator.Upgrade {
             }
         }
 
-        IEnumerator DoConvertAnimatorMeta(AnimatorMeta oldMeta, AnimateMeta newMeta) {
+        IEnumerator DoConvertAnimatorMeta(AnimatorMeta oldMeta, AnimateMeta newMeta, string assetPath) {
             foreach(var oldTake in oldMeta.takes) {
                 var newTake = new Take();
 
                 AddMessage(" - convert take: " + oldTake.name);
 
-                yield return EditorCoroutines.StartCoroutine(DoConvertTake(oldTake, newTake, true), this);
+                yield return EditorCoroutines.StartCoroutine(DoConvertTake(oldTake, newTake, true, assetPath), this);
 
                 newMeta.takes.Add(newTake);
             }
         }
 
-        IEnumerator DoConvertAnimator(AnimatorData animData) {
+        IEnumerator DoConvertAnimator(AnimatorData animData, string assetPath) {
             var go = animData.gameObject;
 
             Animate newAnim;
@@ -347,7 +349,7 @@ namespace M8.Animator.Upgrade {
 
                     AddMessage(" - convert take: " + oldTake.name);
 
-                    yield return EditorCoroutines.StartCoroutine(DoConvertTake(oldTake, newTake, false), this);
+                    yield return EditorCoroutines.StartCoroutine(DoConvertTake(oldTake, newTake, false, assetPath), this);
 
                     newAnimTarget.takes.Add(newTake);
                 }
@@ -356,7 +358,7 @@ namespace M8.Animator.Upgrade {
             newAnim.defaultTakeName = animData.defaultTakeName;
         }
 
-        IEnumerator DoConvertTake(AMTakeData oldTake, Take newTake, bool isMeta) {
+        IEnumerator DoConvertTake(AMTakeData oldTake, Take newTake, bool isMeta, string assetPath) {
             newTake.name = oldTake.name;
             newTake.frameRate = oldTake.frameRate;
             newTake.endFramePadding = oldTake.endFramePadding;
@@ -392,39 +394,263 @@ namespace M8.Animator.Upgrade {
                 Track newTrack = null;
 
                 if(oldTrack is AMAnimationTrack) {
+                    newTrack = new UnityAnimationTrack();
 
+                    ConvertTrackCommonFields(oldTrack, newTrack, true, isMeta);
+                                        
+                    newTrack.keys = new List<Key>();
+                    foreach(AMAnimationKey oldKey in oldTrack.keys) {
+                        var newKey = new UnityAnimationKey();
+
+                        ConvertKeyCommonFields(oldKey, newKey);
+
+                        newKey.wrapMode = oldKey.wrapMode;
+                        newKey.amClip = oldKey.amClip;
+                        newKey.crossfade = oldKey.crossfade;
+                        newKey.crossfadeTime = oldKey.crossfadeTime;
+
+                        newTrack.keys.Add(newKey);
+                    }
                 }
                 else if(oldTrack is AMAudioTrack) {
+                    newTrack = new AudioTrack();
 
+                    ConvertTrackCommonFields(oldTrack, newTrack, true, isMeta);
+
+                    newTrack.keys = new List<Key>();
+                    foreach(AMAudioKey oldKey in oldTrack.keys) {
+                        var newKey = new AudioKey();
+                                                
+                        ConvertKeyCommonFields(oldKey, newKey);
+
+                        newKey.audioClip = oldKey.audioClip;
+                        newKey.loop = oldKey.loop;
+                        newKey.oneShot = oldKey.oneShot;
+
+                        newTrack.keys.Add(newKey);
+                    }
                 }
                 else if(oldTrack is AMCameraSwitcherTrack) {
+                    newTrack = new CameraSwitcherTrack();
 
+                    ConvertTrackCommonFields(oldTrack, newTrack, true, isMeta);
+
+                    newTrack.keys = new List<Key>();
+                    for(int i = 0; i < oldTrack.keys.Count; i++) {
+                        var oldKey = (AMCameraSwitcherKey)oldTrack.keys[i];
+                        var newKey = new CameraSwitcherKey();
+
+                        ConvertKeyCommonFields(oldKey, newKey);
+
+                        newKey.type = oldKey.type;
+                        newKey.typeEnd = oldKey.typeEnd;
+                        newKey.color = oldKey.color;
+                        newKey.colorEnd = oldKey.colorEnd;
+                        newKey.cameraFadeType = oldKey.cameraFadeType;
+                        newKey.cameraFadeParameters = new List<float>(oldKey.cameraFadeParameters);
+                        newKey.irisShape = oldKey.irisShape;
+                        newKey.still = oldKey.still;
+                        newKey.endFrame = oldKey.endFrame;
+
+                        if(isMeta) {
+                            newKey.SetCameraDirect(null, oldKey.cameraTargetPath);
+                            newKey.SetCameraEndDirect(null, oldKey.cameraEndTargetPath);
+                        }
+                        else {
+                            newKey.SetCameraDirect(oldKey.getCamera(null), "");
+                            newKey.SetCameraDirect(oldKey.getCameraEnd(null), "");
+                        }
+
+                        newTrack.keys.Add(newKey);
+                    }
                 }
                 else if(oldTrack is AMEventTrack) {
+                    var newEventTrack = new EventTrack();
+                    newTrack = newEventTrack;
 
+                    ConvertTrackCommonFields(oldTrack, newTrack, false, isMeta);
+
+                    newTrack.keys = new List<Key>();
+
+                    string eventCompName = null;
+
+                    //TODO: create new tracks per different components from keys
+                    //for now we only allow conversion of one component, so the first key will be used.
+                    foreach(AMEventKey oldKey in oldTrack.keys) {
+                        string keyCompName = oldKey.getComponentName();
+
+                        if(string.IsNullOrEmpty(eventCompName)) {
+                            if(!string.IsNullOrEmpty(keyCompName)) {
+                                eventCompName = keyCompName;
+
+                                AddMessage("   - EventTrack using component: " + eventCompName);
+
+                                if(isMeta)
+                                    newEventTrack.SetTargetAsComponentDirect(oldTrack.targetPath, null, eventCompName);
+                                else
+                                    newEventTrack.SetTargetAsComponentDirect("", oldKey.getComponentRef(), eventCompName);
+                            }
+                        }
+
+                        //only add if component matched
+                        if(string.IsNullOrEmpty(eventCompName) || keyCompName != eventCompName) {
+                            AddMessage("   - Cannot add EventKey with Component: " + eventCompName, Color.yellow);
+                            continue;
+                        }
+
+                        var newKey = new EventKey();
+
+                        ConvertKeyCommonFields(oldKey, newKey);
+
+                        newKey.useSendMessage = oldKey.useSendMessage;
+                        newKey.methodName = oldKey.methodName;
+
+                        newKey.parameters = new List<EventParameter>(oldKey.parameters.Count);
+                        for(int i = 0; i < oldKey.parameters.Count; i++) {
+                            var oldParm = oldKey.parameters[i];
+                            var newParm = new EventParameter();
+
+                            ConvertEventParameter(oldParm, newParm);
+
+                            newKey.parameters.Add(newParm);
+                        }
+
+                        newTrack.keys.Add(newKey);
+                    }
                 }
                 else if(oldTrack is AMGOSetActiveTrack) {
+                    var oldGOTrack = (AMGOSetActiveTrack)oldTrack;
+                    var newGOTrack = new GOSetActiveTrack();
 
+                    newTrack = newGOTrack;
+
+                    ConvertTrackCommonFields(oldTrack, newTrack, true, isMeta);
+
+                    newGOTrack.startActive = oldGOTrack.startActive;
+
+                    newTrack.keys = new List<Key>();
+                    foreach(AMGOSetActiveKey oldKey in oldTrack.keys) {
+                        var newKey = new GOSetActiveKey();
+
+                        ConvertKeyCommonFields(oldKey, newKey);
+
+                        newKey.setActive = oldKey.setActive;
+                        newKey.endFrame = oldKey.endFrame;
+
+                        newTrack.keys.Add(newKey);
+                    }
                 }
                 else if(oldTrack is AMMaterialTrack) {
+                    var oldMatTrack = (AMMaterialTrack)oldTrack;
+                    var newMatTrack = new MaterialTrack();
 
+                    newTrack = newMatTrack;
+
+                    ConvertTrackCommonFields(oldTrack, newTrack, true, isMeta);
+
+                    newMatTrack.materialIndex = oldMatTrack.materialIndex;
+                    newMatTrack.property = oldMatTrack.property;
+                    newMatTrack.propertyType = (MaterialTrack.ValueType)oldMatTrack.propertyType;
+
+                    newTrack.keys = new List<Key>();
+                    foreach(AMMaterialKey oldKey in oldTrack.keys) {
+                        var newKey = new MaterialKey();
+
+                        ConvertKeyCommonFields(oldKey, newKey);
+
+                        newKey.endFrame = oldKey.endFrame;
+                        newKey.texture = oldKey.texture;
+                        newKey.vector = oldKey.vector;
+
+                        newTrack.keys.Add(newKey);
+                    }
                 }
                 else if(oldTrack is AMOrientationTrack) {
+                    newTrack = new OrientationTrack();
 
+                    ConvertTrackCommonFields(oldTrack, newTrack, true, isMeta);
+
+                    newTrack.keys = new List<Key>();
+                    foreach(AMOrientationKey oldKey in oldTrack.keys) {
+                        var newKey = new OrientationKey();
+
+                        ConvertKeyCommonFields(oldKey, newKey);
+
+                        if(isMeta)
+                            newKey.SetTargetDirect(null, oldKey.GetTargetPath());
+                        else
+                            newKey.SetTargetDirect(oldKey.GetTarget(null), "");
+
+                        newKey.endFrame = oldKey.endFrame;
+
+                        newTrack.keys.Add(newKey);
+                    }
                 }
                 else if(oldTrack is AMPropertyTrack) {
+                    var oldPropTrack = (AMPropertyTrack)oldTrack;
+                    var newPropTrack = new PropertyTrack();
 
+                    newTrack = newPropTrack;
+
+                    ConvertTrackCommonFields(oldTrack, newTrack, true, isMeta);
+
+                    newPropTrack.valueType = (PropertyTrack.ValueType)oldPropTrack.valueType;
+
+                    if(oldPropTrack.isPropertySet()) {
+                        Component comp = oldPropTrack.GetTargetComp(null);
+                        string compName = oldPropTrack.getComponentName();
+                        bool isField = oldPropTrack.isField;
+                        string fieldName = oldPropTrack.getMemberName();
+
+                        if(isMeta)
+                            newPropTrack.SetTargetCompDirect(null, compName, isField, fieldName);
+                        else
+                            newPropTrack.SetTargetCompDirect(comp, compName, isField, fieldName);
+                    }
+
+                    newTrack.keys = new List<Key>();
+                    foreach(AMPropertyKey oldKey in oldTrack.keys) {
+                        var newKey = new PropertyKey();
+
+                        ConvertKeyCommonFields(oldKey, newKey);
+
+                        newKey.endFrame = oldKey.endFrame;
+                        newKey.val = oldKey.val;
+                        newKey.valString = oldKey.valString;
+                        newKey.valObj = oldKey.valObj;
+                        newKey.vect4 = oldKey.vect4;
+
+                        newTrack.keys.Add(newKey);
+                    }
                 }
                 else if(oldTrack is AMRotationEulerTrack) {
+                    var oldRotEulerTrack = (AMRotationEulerTrack)oldTrack;
+                    var newRotEulerTrack = new RotationEulerTrack();
 
+                    newTrack = newRotEulerTrack;
+
+                    ConvertTrackCommonFields(oldTrack, newTrack, true, isMeta);
+
+                    newRotEulerTrack.axis = (AxisFlags)oldRotEulerTrack.axis;
+
+                    newTrack.keys = new List<Key>();
+                    foreach(AMRotationEulerKey oldKey in oldTrack.keys) {
+                        var newKey = new RotationEulerKey();
+
+                        ConvertKeyCommonFields(oldKey, newKey);
+
+                        newKey.rotation = oldKey.rotation;
+                        newKey.endFrame = oldKey.endFrame;
+
+                        newTrack.keys.Add(newKey);
+                    }
                 }
                 else if(oldTrack is AMRotationTrack) {
                     newTrack = new RotationTrack();
 
-                    ConvertTrackCommonFields(oldTrack, newTrack, isMeta);
+                    ConvertTrackCommonFields(oldTrack, newTrack, true, isMeta);
                                         
                     newTrack.keys = new List<Key>();
-
                     foreach(AMRotationKey oldKey in oldTrack.keys) {
                         var newKey = new RotationKey();
 
@@ -437,12 +663,17 @@ namespace M8.Animator.Upgrade {
                     }
                 }
                 else if(oldTrack is AMTranslationTrack) {
-                    newTrack = new TranslationTrack();
+                    var oldTransTrack = (AMTranslationTrack)oldTrack;
+                    var newTransTrack = new TranslationTrack();
 
-                    ConvertTrackCommonFields(oldTrack, newTrack, isMeta);
-                    
+                    newTrack = newTransTrack;
+
+                    ConvertTrackCommonFields(oldTrack, newTrack, true, isMeta);
+
+                    newTransTrack.pixelPerUnit = oldTransTrack.pixelPerUnit;
+                    newTransTrack.pixelSnap = oldTransTrack.pixelSnap;
+                                        
                     newTrack.keys = new List<Key>();
-
                     foreach(AMTranslationKey oldKey in oldTrack.keys) {
                         var newKey = new TranslationKey();
 
@@ -458,8 +689,51 @@ namespace M8.Animator.Upgrade {
                         newTrack.keys.Add(newKey);
                     }
                 }
-                else if(oldTrack is AMTriggerTrack) {
+                else if(oldTrack is AMTriggerTrack) { //convert TriggerTrack to EventTrack with TriggerSignal
+                    var newTriggerTrack = new EventTrack();
 
+                    newTrack = newTriggerTrack;
+
+                    ConvertTrackCommonFields(oldTrack, newTrack, false, isMeta);
+
+                    //grab/create signal for this trigger
+                    string signalPath = GetTriggerSignalPath(assetPath);
+
+                    TriggerSignal triggerSignal;
+                    if(!mTriggerSignalLookup.TryGetValue(signalPath, out triggerSignal)) {
+                        //try to load it if it exists
+                        triggerSignal = AssetDatabase.LoadAssetAtPath<TriggerSignal>(signalPath);
+                        if(!triggerSignal) {
+                            AddMessage("  - Creating Trigger Signal: " + signalPath);
+
+                            triggerSignal = ScriptableObject.CreateInstance<TriggerSignal>();
+                            AssetDatabase.CreateAsset(triggerSignal, signalPath);
+                            AssetDatabase.SaveAssets();
+
+                            yield return new WaitForFixedUpdate();
+                        }
+
+                        mTriggerSignalLookup.Add(signalPath, triggerSignal);
+                    }
+
+                    newTriggerTrack.SetTargetAsObject(triggerSignal);
+
+                    newTrack.keys = new List<Key>();
+                    foreach(AMTriggerKey oldKey in oldTrack.keys) {
+                        var newKey = new EventKey();
+
+                        ConvertKeyCommonFields(oldKey, newKey);
+
+                        newKey.useSendMessage = false;
+                        newKey.methodName = "Invoke";
+
+                        newKey.parameters = new List<EventParameter>(3);
+                        newKey.parameters.Add(new EventParameter() { valueType = EventData.ValueType.String, val_string = oldKey.valueString });
+                        newKey.parameters.Add(new EventParameter() { valueType = EventData.ValueType.Integer, val_int = oldKey.valueInt });
+                        newKey.parameters.Add(new EventParameter() { valueType = EventData.ValueType.Float, val_float = oldKey.valueFloat });
+
+                        newTrack.keys.Add(newKey);
+                    }
                 }
 
                 newTake.trackValues.Add(newTrack);
@@ -468,15 +742,47 @@ namespace M8.Animator.Upgrade {
             }
         }
 
-        void ConvertTrackCommonFields(AMTrack oldTrack, Track newTrack, bool isMeta) {
+        void ConvertEventData(AMEventData oldParam, EventData newParam) {
+            newParam.paramName = oldParam.paramName;
+            newParam.valueType = (EventData.ValueType)oldParam.valueType;
+            newParam.val_int = oldParam.val_int;
+            newParam.val_string = oldParam.val_string;
+            newParam.val_vect4 = oldParam.val_vect4;
+            newParam.val_obj = oldParam.val_obj;
+        }
+
+        void ConvertEventParameter(AMEventParameter oldParam, EventParameter newParam) {
+            ConvertEventData(oldParam, newParam);
+
+            newParam.lsArray = new List<EventData>(oldParam.lsArray.Count);
+            for(int i = 0; i < oldParam.lsArray.Count; i++) {
+                EventData newParamItem;
+
+                var oldParamItem = oldParam.lsArray[i];
+                if(oldParamItem is AMEventParameter) {
+                    newParamItem = new EventParameter();
+                    ConvertEventParameter((AMEventParameter)oldParamItem, (EventParameter)newParamItem);
+                }
+                else {
+                    newParamItem = new EventData();
+                    ConvertEventData(oldParamItem, newParamItem);
+                }
+
+                newParam.lsArray.Add(newParamItem);
+            }
+        }
+
+        void ConvertTrackCommonFields(AMTrack oldTrack, Track newTrack, bool applyTarget, bool isMeta) {
             newTrack.id = oldTrack.id;
             newTrack.name = oldTrack.name;
             newTrack.foldout = oldTrack.foldout;
 
-            if(isMeta)
-                newTrack.SetTargetDirect(null, oldTrack.targetPath);
-            else
-                newTrack.SetTargetDirect(oldTrack.GetTarget(null), "");
+            if(applyTarget) {
+                if(isMeta)
+                    newTrack.SetTargetDirect(null, oldTrack.targetPath);
+                else
+                    newTrack.SetTargetDirect(oldTrack.GetTarget(null), "");
+            }
         }
 
         void ConvertKeyCommonFields(AMKey oldKey, Key newKey) {
@@ -497,6 +803,19 @@ namespace M8.Animator.Upgrade {
                 return oldMetaPath.Substring(0, extInd) + ".asset";
         }
 
+        string GetTriggerSignalPath(string path) {
+            int extInd = path.LastIndexOf('.');
+            if(extInd == -1) {
+                //create in TriggerSignal folder
+                if(!AssetDatabase.IsValidFolder("Assets/TriggerSignal"))
+                    AssetDatabase.CreateFolder("Assets", "TriggerSignal");
+
+                return "Assets/TriggerSignal/" + path + "TriggerSignal.asset";
+            }
+            else
+                return path.Substring(0, extInd) + "TriggerSignal.asset";
+        }
+
         private void AddMessage(string text) {
             //Debug.Log(text);
             mMessages.Add(new Message(text));
@@ -507,6 +826,13 @@ namespace M8.Animator.Upgrade {
         }
     }
 }
+ 
+ 
+ 
+ 
+ 
+ 
+ 
  
  
  
